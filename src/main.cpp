@@ -11,6 +11,8 @@ TFT_eSPI tft = TFT_eSPI();
 
 // --- Configuración de Hardware ---
 #define PIN_BL 32
+#define PIN_RELE1 33
+#define PIN_RELE2 26
 
 // --- Paleta de Colores ---
 #define COL_FONDO 0x0842
@@ -24,6 +26,8 @@ TFT_eSPI tft = TFT_eSPI();
 // --- Variables de Estado ---
 bool sistemaEstado = false;
 bool pantallaEncendida = true;
+unsigned long lastRelayMillis = 0;
+bool estadoRele = false;
 
 // --- Geometría de Botones ---
 const int btnY = 250;
@@ -39,14 +43,21 @@ void dibujarBotonSistema(bool estado);
 void dibujarBotonBL();
 void touch_calibrate();
 void gestionarModoEnergia(bool despertar);
+void actualizarVisualReles(); // Corregido: sin acento
 
 void setup()
 {
   Serial.begin(115200);
 
-  // Configurar Pin de Retroiluminación (PNP)
+  // Configurar Pines de Relés
+  pinMode(PIN_RELE1, OUTPUT);
+  pinMode(PIN_RELE2, OUTPUT);
+  digitalWrite(PIN_RELE1, LOW);
+  digitalWrite(PIN_RELE2, HIGH); // Inician conmutados
+
+  // Configurar Pin de Retroiluminación (Lógica PNP: LOW es ON)
   pinMode(PIN_BL, OUTPUT);
-  digitalWrite(PIN_BL, HIGH); // Encender inmediatamente
+  digitalWrite(PIN_BL, LOW);
 
   if (!SPIFFS.begin(true))
     Serial.println("Error SPIFFS");
@@ -60,24 +71,40 @@ void setup()
   dibujarInterfazBase();
   dibujarBotonSistema(sistemaEstado);
   dibujarBotonBL();
+  actualizarVisualReles();
 
-  Serial.println("--- Dashboard Listo (High Performance Mode) ---");
+  Serial.println("--- Dashboard Listo (Relés Activos) ---");
 }
 
 void loop()
 {
   uint16_t x, y;
 
+  // --- Lógica de Conmutación de Relés (Cada 3 segundos) ---
+  if (millis() - lastRelayMillis >= 3000)
+  {
+    lastRelayMillis = millis();
+    estadoRele = !estadoRele;
+
+    digitalWrite(PIN_RELE1, estadoRele);
+    digitalWrite(PIN_RELE2, !estadoRele);
+
+    // Solo actualizamos la pantalla si está encendida
+    if (pantallaEncendida)
+    {
+      actualizarVisualReles();
+    }
+  }
+
   if (tft.getTouch(&x, &y, 250))
   {
-
-    // --- MODO SUSPENSIÓN (Bajo Consumo) ---
+    // --- MODO SUSPENSIÓN ---
     if (!pantallaEncendida)
     {
-      // Si toca el botón BL SLEEP (Derecha)
       if ((x > btn2X) && (x < (btn2X + btnW)) && (y > btnY) && (y < (btnY + btnH)))
       {
-        gestionarModoEnergia(true); // Despertar todo
+        gestionarModoEnergia(true);
+        actualizarVisualReles();
         Serial.println("WAKEUP: Restaurando frecuencias y pantalla");
         delay(300);
       }
@@ -87,7 +114,6 @@ void loop()
     // --- MODO ACTIVO ---
     else
     {
-      // Botón SISTEMA (Izquierda)
       if ((x > btn1X) && (x < (btn1X + btnW)) && (y > btnY) && (y < (btnY + btnH)))
       {
         sistemaEstado = !sistemaEstado;
@@ -96,13 +122,11 @@ void loop()
         Serial.println(sistemaEstado ? "ON" : "OFF");
         delay(350);
       }
-
-      // Botón BL SLEEP (Derecha) -> ENTRAR EN BAJO CONSUMO
       else if ((x > btn2X) && (x < (btn2X + btnW)) && (y > btnY) && (y < (btnY + btnH)))
       {
         Serial.println("SLEEP: Entrando en modo ahorro...");
         delay(200);
-        gestionarModoEnergia(false); // Apagar y reducir consumo
+        gestionarModoEnergia(false);
       }
     }
 
@@ -111,46 +135,38 @@ void loop()
   }
 }
 
-// ================================================================
-// GESTIÓN DE ENERGÍA AVANZADA
-// ================================================================
+void actualizarVisualReles()
+{
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextSize(1);
+
+  // Rele 1
+  tft.setTextColor(estadoRele ? COL_BTN_ON : COL_SUBTEXTO, COL_CARD);
+  tft.drawString(estadoRele ? " ESTADO: ON " : " ESTADO: OFF", 62, 195, 2);
+
+  // Rele 2
+  tft.setTextColor(!estadoRele ? COL_BTN_ON : COL_SUBTEXTO, COL_CARD);
+  tft.drawString(!estadoRele ? " ESTADO: ON " : " ESTADO: OFF", 177, 195, 2);
+}
 
 void gestionarModoEnergia(bool despertar)
 {
   if (despertar)
   {
-    // 1. Restaurar Velocidad del CPU (240MHz para máxima fluidez)
     setCpuFrequencyMhz(240);
-
-    // 2. Despertar controlador de pantalla (Command Sleep Out)
     tft.writecommand(0x11);
-    delay(120); // Tiempo necesario según datasheet ILI9341
-
-    // 3. Encender retroiluminación
-    digitalWrite(PIN_BL, HIGH);
-
+    delay(120);
+    digitalWrite(PIN_BL, HIGH); // PNP ON
     pantallaEncendida = true;
   }
   else
   {
-    // 1. Apagar retroiluminación (Lógica PNP: HIGH)
-    digitalWrite(PIN_BL, LOW);
-
-    // 2. Poner pantalla en modo Sleep (Command Sleep In)
-    // Reduce el consumo del chip ILI9341 a unos pocos microamperios
+    digitalWrite(PIN_BL, LOW); // PNP OFF
     tft.writecommand(0x10);
-
-    // 3. Reducir Velocidad del CPU (80MHz consume mucho menos que 240MHz)
-    // Bajamos a 80MHz porque es el mínimo para mantener el bus SPI estable
     setCpuFrequencyMhz(80);
-
     pantallaEncendida = false;
   }
 }
-
-// ================================================================
-// FUNCIONES DE INTERFAZ (Sin cambios)
-// ================================================================
 
 void dibujarBotonSistema(bool estado)
 {
@@ -159,7 +175,7 @@ void dibujarBotonSistema(bool estado)
   tft.drawRoundRect(btn1X, btnY, btnW, btnH, 8, COL_ACCENT);
   tft.setTextColor(COL_TEXTO);
   tft.setTextDatum(MC_DATUM);
-  tft.drawString(estado ? "TACIL ON" : "TACTIL OFF", btn1X + (btnW / 2), btnY + (btnH / 2), 2);
+  tft.drawString(estado ? "TACTIL ON" : "TACTIL OFF", btn1X + (btnW / 2), btnY + (btnH / 2), 2);
 }
 
 void dibujarBotonBL()
