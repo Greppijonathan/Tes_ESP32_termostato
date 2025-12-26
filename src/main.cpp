@@ -3,16 +3,20 @@
 #include <TFT_eSPI.h>
 #include "FS.h"
 #include "SPIFFS.h"
-
-// Librería para el manejo de energía del ESP32
+#include <OneWire.h>
+#include <DallasTemperature.h>
 #include "esp32-hal-cpu.h"
-
-TFT_eSPI tft = TFT_eSPI();
 
 // --- Configuración de Hardware ---
 #define PIN_BL 32
 #define PIN_RELE1 33
 #define PIN_RELE2 26
+#define ONE_WIRE_BUS 27
+
+// --- Instancias ---
+TFT_eSPI tft = TFT_eSPI();
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
 
 // --- Paleta de Colores ---
 #define COL_FONDO 0x0842
@@ -27,6 +31,7 @@ TFT_eSPI tft = TFT_eSPI();
 bool sistemaEstado = false;
 bool pantallaEncendida = true;
 unsigned long lastRelayMillis = 0;
+unsigned long lastTempMillis = 0;
 bool estadoRele = false;
 
 // --- Geometría de Botones ---
@@ -43,11 +48,15 @@ void dibujarBotonSistema(bool estado);
 void dibujarBotonBL();
 void touch_calibrate();
 void gestionarModoEnergia(bool despertar);
-void actualizarVisualReles(); // Corregido: sin acento
+void actualizarVisualReles();
+void actualizarTemperaturas();
 
 void setup()
 {
   Serial.begin(115200);
+
+  // Inicializar Sensores Dallas
+  sensors.begin();
 
   // Configurar Pines de Relés
   pinMode(PIN_RELE1, OUTPUT);
@@ -55,7 +64,7 @@ void setup()
   digitalWrite(PIN_RELE1, LOW);
   digitalWrite(PIN_RELE2, HIGH); // Inician conmutados
 
-  // Configurar Pin de Retroiluminación (Lógica PNP: LOW es ON)
+  // Configurar Pin de Retroiluminación (Lógica PNP según tu código original: LOW es ON)
   pinMode(PIN_BL, OUTPUT);
   digitalWrite(PIN_BL, LOW);
 
@@ -72,6 +81,7 @@ void setup()
   dibujarBotonSistema(sistemaEstado);
   dibujarBotonBL();
   actualizarVisualReles();
+  actualizarTemperaturas();
 
   Serial.println("--- Dashboard Listo (Relés Activos) ---");
 }
@@ -80,16 +90,23 @@ void loop()
 {
   uint16_t x, y;
 
+  // --- Lógica de Lectura de Sensores (Cada 2 segundos) ---
+  if (millis() - lastTempMillis >= 2000)
+  {
+    lastTempMillis = millis();
+    if (pantallaEncendida)
+    {
+      actualizarTemperaturas();
+    }
+  }
+
   // --- Lógica de Conmutación de Relés (Cada 3 segundos) ---
   if (millis() - lastRelayMillis >= 3000)
   {
     lastRelayMillis = millis();
     estadoRele = !estadoRele;
-
     digitalWrite(PIN_RELE1, estadoRele);
     digitalWrite(PIN_RELE2, !estadoRele);
-
-    // Solo actualizamos la pantalla si está encendida
     if (pantallaEncendida)
     {
       actualizarVisualReles();
@@ -105,12 +122,12 @@ void loop()
       {
         gestionarModoEnergia(true);
         actualizarVisualReles();
+        actualizarTemperaturas();
         Serial.println("WAKEUP: Restaurando frecuencias y pantalla");
         delay(300);
       }
       return;
     }
-
     // --- MODO ACTIVO ---
     else
     {
@@ -129,9 +146,38 @@ void loop()
         gestionarModoEnergia(false);
       }
     }
-
     while (tft.getTouch(&x, &y, 250))
       ;
+  }
+}
+
+void actualizarTemperaturas()
+{
+  sensors.requestTemperatures();
+  float t1 = sensors.getTempCByIndex(0);
+  float t2 = sensors.getTempCByIndex(1);
+
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(COL_TEXTO, COL_CARD);
+
+  // Sensor 1
+  if (t1 == DEVICE_DISCONNECTED_C)
+  {
+    tft.drawString("--.- C", 62, 105, 4);
+  }
+  else
+  {
+    tft.drawString(String(t1, 1) + " C", 62, 105, 4);
+  }
+
+  // Sensor 2
+  if (t2 == DEVICE_DISCONNECTED_C)
+  {
+    tft.drawString("--.- C", 177, 105, 4);
+  }
+  else
+  {
+    tft.drawString(String(t2, 1) + " C", 177, 105, 4);
   }
 }
 
@@ -139,12 +185,8 @@ void actualizarVisualReles()
 {
   tft.setTextDatum(MC_DATUM);
   tft.setTextSize(1);
-
-  // Rele 1
   tft.setTextColor(estadoRele ? COL_BTN_ON : COL_SUBTEXTO, COL_CARD);
   tft.drawString(estadoRele ? " ESTADO: ON " : " ESTADO: OFF", 62, 195, 2);
-
-  // Rele 2
   tft.setTextColor(!estadoRele ? COL_BTN_ON : COL_SUBTEXTO, COL_CARD);
   tft.drawString(!estadoRele ? " ESTADO: ON " : " ESTADO: OFF", 177, 195, 2);
 }
@@ -156,12 +198,15 @@ void gestionarModoEnergia(bool despertar)
     setCpuFrequencyMhz(240);
     tft.writecommand(0x11);
     delay(120);
-    digitalWrite(PIN_BL, HIGH); // PNP ON
+    digitalWrite(PIN_BL, HIGH);
     pantallaEncendida = true;
+    dibujarInterfazBase();
+    dibujarBotonSistema(sistemaEstado);
+    dibujarBotonBL();
   }
   else
   {
-    digitalWrite(PIN_BL, LOW); // PNP OFF
+    digitalWrite(PIN_BL, LOW);
     tft.writecommand(0x10);
     setCpuFrequencyMhz(80);
     pantallaEncendida = false;
@@ -200,10 +245,10 @@ void dibujarInterfazBase()
   tft.drawRoundRect(10, 150, 105, cardH, 8, TFT_WHITE);
   tft.drawRoundRect(125, 150, 105, cardH, 8, TFT_WHITE);
   tft.setTextColor(COL_SUBTEXTO);
-  tft.drawString("Sensor 1", 62, 70);
-  tft.drawString("Sensor 2", 177, 70);
-  tft.drawString("Rele 1", 62, 165);
-  tft.drawString("Rele 2", 177, 165);
+  tft.drawString("Sensor 1", 62, 70, 2);
+  tft.drawString("Sensor 2", 177, 70, 2);
+  tft.drawString("Rele 1", 62, 165, 2);
+  tft.drawString("Rele 2", 177, 165, 2);
 }
 
 void touch_calibrate()
