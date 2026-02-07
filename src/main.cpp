@@ -101,7 +101,7 @@ void setup()
 
   // 7. FINAL DEL SETUP: FORZAR ENCENDIDO DE LUZ
   pinMode(PIN_BL, OUTPUT);
-  digitalWrite(PIN_BL, HIGH); // 1 = ON
+  digitalWrite(PIN_BL, LOW); // 1 = ON
   pantallaEncendida = true;
 
   Serial.println("--- Sistema Iniciado y Pantalla ON ---");
@@ -228,7 +228,7 @@ void gestionarModoEnergia(bool despertar)
     setCpuFrequencyMhz(240);
     tft.writecommand(0x11); // Wake up display
     delay(120);
-    digitalWrite(PIN_BL, HIGH); // 1 = ON
+    digitalWrite(PIN_BL, LOW); // 1 = ON
     pantallaEncendida = true;
 
     dibujarInterfazBase();
@@ -310,6 +310,45 @@ void dibujarInterfazBase()
 
 void touch_calibrate()
 {
-  uint16_t calData[5] = {275, 3494, 361, 3528, 4};
-  tft.setTouch(calData);
+  uint16_t calData[5];
+  uint8_t check = 0; // Inicializamos check en 0
+
+  // 1. Verificar si existe el archivo de calibración usando el namespace fs::
+  if (SPIFFS.exists("/TouchCalData")) {
+    fs::File f = SPIFFS.open("/TouchCalData", "r"); // Cambiado a fs::File
+    if (f) {
+      if (f.readBytes((char *)calData, 14) == 14) check = 1;
+      f.close();
+    }
+  }
+
+  if (check && !Serial.available()) {
+    // 2. Si el archivo existe, cargar los datos
+    tft.setTouch(calData);
+    Serial.println("Datos de calibracion cargados desde SPIFFS");
+  } else {
+    // 3. Si no existe, ejecutar calibracion interactiva
+    tft.fillScreen(TFT_BLACK);
+    tft.setCursor(20, 0);
+    tft.setTextFont(2);
+    tft.setTextSize(1);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+
+    tft.println("Toca las esquinas indicadas para calibrar");
+
+    tft.setTextFont(1);
+    tft.println("(Mantente presionado hasta que desaparezca)");
+
+    // Ejecuta la rutina de la libreria
+    tft.calibrateTouch(calData, TFT_MAGENTA, TFT_BLACK, 15);
+
+    // 4. Guardar los nuevos datos en SPIFFS usando fs::File
+    fs::File f = SPIFFS.open("/TouchCalData", "w"); // Cambiado a fs::File
+    if (f) {
+      f.write((const unsigned char *)calData, 14);
+      f.close();
+      Serial.println("Calibracion completa y guardada.");
+    }
+    tft.fillScreen(TFT_BLACK);
+  }
 }
